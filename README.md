@@ -22,7 +22,9 @@ dsh plugin --profile web add dsh-cosplay
 
 装完重启 dsh 即可。前提：pnpm 在 PATH（Windows 上确保 `pnpm.cmd` 可用）。
 
-> 依赖说明：运行时只需额外装一个 `@deepseek-ai/schemastery`；其余服务包（cordis、dsh-settings、dsh-tools、dsh-system-prompt、dsh-typert-protocol）由 dsh 自带解析，无需单独安装。
+> 依赖说明：运行时只需额外装一个 `@deepseek-ai/schemastery`；其余服务包（cordis、dsh-settings、dsh-tools、dsh-system-prompt）由 dsh 自带解析，无需单独安装。
+>
+> 兼容性：本版本已升级适配 DeepSeek Harness `0.1.2-rc.1` API（改用 `getSectionOrder('DEPLOYMENT_PERSONA')` 而非 `PERSONA_ORDER`；设置页改走标准 `remote.settings` 命名空间，不再自建 typert Remote）。
 
 ## 使用
 
