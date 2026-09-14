@@ -80,6 +80,24 @@ export const COSPLAY_NAMESPACE = 'cosplay'
 /** 追加人格段的段名（与 persona 段名不同，避免同一层重复名冲突）。 */
 export const PERSONA_SECTION_ADDON = 'cosplay-persona'
 
+/**
+ * persona 段基准 order（跨版本兼容）。
+ *
+ * 0.1.2-rc.1 的 section order 表用 `DEPLOYMENT_PERSONA`（=0）；0.1.5-rc.1 把它
+ * 拆成 `DEPLOYMENT_PERSONA_PREFIX`（=0）与 `DEPLOYMENT_PERSONA_SUFFIX`（=10200）。
+ * `getSectionOrder()` 对未知 key 返回 undefined：参与加法得到 NaN 后，
+ * `section()` 的 `order must be a finite number` 检查会抛 TypeError，插件在
+ * apply 阶段直接装载失败。因此按版本逐个回退，全都不认识时退回 0
+ * （等价于旧版 persona 段的位置）。
+ */
+function resolvePersonaOrder(systemPrompt) {
+  for (const key of ['DEPLOYMENT_PERSONA_PREFIX', 'DEPLOYMENT_PERSONA']) {
+    const order = systemPrompt.getSectionOrder(key)
+    if (Number.isFinite(order)) return order
+  }
+  return 0
+}
+
 const textOutput = {
   schema: { type: 'string' },
   render(_args, value) {
@@ -103,15 +121,16 @@ export function apply(ctx) {
   }
 
   // ── 人格注入（全局，随变量每次组装求值；含思维链指令，见 store.js） ──────
-  // 0.1.2-rc.1 起 dsh-system-prompt 不再导出 PERSONA_ORDER；改用集中维护的
-  // section order 表：deployment persona 为 DEPLOYMENT_PERSONA（=0），cosplay
-  // 人格段紧随其后。section()/variable() 已返回 disposer，这里包进 ctx.effect
-  // 以便插件热重载时正确清理。
+  // section order 表由 dsh-system-prompt 集中维护：deployment persona 在
+  // 0.1.2-rc.1 是 DEPLOYMENT_PERSONA（=0），0.1.5-rc.1 拆成
+  // DEPLOYMENT_PERSONA_PREFIX（=0）/ DEPLOYMENT_PERSONA_SUFFIX（=10200）；
+  // cosplay 人格段始终紧随 persona 前缀之后（见 resolvePersonaOrder）。
+  // section()/variable() 已返回 disposer，这里包进 ctx.effect 以便热重载清理。
   ctx.effect(() => {
     const disposeVariable = ctx.systemPrompt.variable('cosplay_active', () => renderActivePersona(read()))
     const disposeSection = ctx.systemPrompt.section({
       name: PERSONA_SECTION_ADDON,
-      order: ctx.systemPrompt.getSectionOrder('DEPLOYMENT_PERSONA') + 1,
+      order: resolvePersonaOrder(ctx.systemPrompt) + 1,
       text: '{{cosplay_active}}',
     })
     return () => {

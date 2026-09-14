@@ -24,7 +24,7 @@ dsh plugin --profile web add dsh-cosplay
 
 > 依赖说明：运行时只需额外装一个 `@deepseek-ai/schemastery`；其余服务包（cordis、dsh-settings、dsh-tools、dsh-system-prompt）由 dsh 自带解析，无需单独安装。
 >
-> 兼容性：本版本已升级适配 DeepSeek Harness `0.1.2-rc.1` API（改用 `getSectionOrder('DEPLOYMENT_PERSONA')` 而非 `PERSONA_ORDER`；设置页改走标准 `remote.settings` 命名空间，不再自建 typert Remote）。
+> 兼容性：同时支持 DeepSeek Harness `0.1.2-rc.1` 与 `0.1.5-rc.1`。persona 段位置按版本解析（`DEPLOYMENT_PERSONA_PREFIX` 优先，回退旧 `DEPLOYMENT_PERSONA`）——0.1.5-rc.1 把该常量拆成了前缀/后缀两个，旧 key 查表得到 `undefined`，会让段注册抛错导致插件装载失败。设置页走标准 `remote.settings` 命名空间，不再自建 typert Remote。
 
 ## 使用
 
