@@ -2,21 +2,29 @@
  * dsh-cosplay — 主机侧核心插件（组合行 id: cosplay-core）。
  *
  * 形态：全局开关（Round 3 决策）。
- *   - 注册 settings 命名空间 `cosplay`（角色库 + 开关，$DSH_HOME/settings.yaml，
- *     热重载、schema 校验、revision 栅栏写入；内置示例角色经 composition base
- *     层提供，零启动写入）；
- *   - 提供 `cosplay` 服务能力（角色 CRUD / 激活 / 开关）—— 现在直接由标准
- *     settings 命名空间承载，浏览器设置页经 `remote.settings` 远程读写，无需自建
- *     typert Remote（0.1.2-rc.1 起第三方命名空间不再受白名单限制）；
+ *   - 状态即插件自身 Config 的 volatile 字段（enabled / thinkingStyle /
+ *     activeRole / roles）：0.1.7 起 settings 不再是「自定义命名空间注册表」，
+ *     而是把每个 profile 条目**自己的 Config schema** 投影成表单
+ *     （SettingsForms）。可编辑字段标 `.volatile()` 后写入不触发插件重挂，
+ *     Loader 走 volatile-only 路径原地更新引用（`loader/volatile-update`）。
+ *     表单读写与持久化仍由 dsh 自带的 settings / config-editor 承担，
+ *     插件不自建 typert Remote。
+ *   - 读：`apply(ctx, config)` 的 config 里 volatile 字段是稳定引用，
+ *     `config.<field>.get()` 取当前快照 —— 开关 / 换角色下一模型步骤即生效，
+ *     无需重建会话。
+ *   - 写：`ctx.get('configEditor').edit(entry, ...)` 把完整 volatile 配置写回
+ *     profile patch（$DSH_HOME/profiles/<name>/cordis.patch.yml）。
  *   - 注册**全局**追加人格段 `cosplay-persona`（位于 persona 之后）与
  *     `{{cosplay_active}}` 变量：变量每次模型步骤组装时求值，开关关闭时渲染
- *     空串（人格静默回退），开启时渲染激活角色卡 —— 开/关/换角色下一模型步骤
- *     即生效，无需重建会话；
+ *     空串（人格静默回退），开启时渲染激活角色卡。
  *   - 注册**全局** `cosplay_*` 工具：`cosplay_switch` 在开关关闭时软禁用
  *     （提示先开启）；角色库管理工具（list/show/upsert/remove）始终可用。
  *
  * 本行是纯主机平面：不依赖任何 preset。全局生效范围含所有会话与子代理
  * （Round 3 已与用户确认）。
+ *
+ * 兼容性：0.1.7-alpha.2 起。0.1.5 及更早版本的 `ctx.settings.register/get`
+ * 命名空间 API 已被移除，本插件不再支持那些版本。
  */
 import z from '@deepseek-ai/schemastery'
 import { defineTool } from '@deepseek-ai/dsh-tools'
@@ -40,7 +48,7 @@ import {
 } from './skill.js'
 
 export const name = 'cosplay-core'
-export const inject = ['settings', 'systemPrompt', 'tools', 'skills']
+export const inject = ['systemPrompt', 'tools', 'skills']
 
 const RoleCardSchema = z.object({
   id: z.string().required(),
@@ -64,19 +72,23 @@ const RoleCardSchema = z.object({
   behavior: z.string().default(''),
 })
 
-// schemastery 无 null 类型：activeRole 以空串表示"未选择"（存储层），
-// store 层内部仍用 null 语义，写入时序列化为空串。
-const CosplaySettingsSchema = z.object({
-  enabled: z.boolean().default(false),
-  thinkingStyle: z.union(['neutral', 'role']).default('neutral'),
-  activeRole: z.string().default(''),
-  roles: z.array(RoleCardSchema).default([]),
+/**
+ * 插件配置 = 角色库状态（0.1.7 起设置页由此投影生成）。
+ *
+ * 四个字段全部 `.volatile()`：设置页可编辑，写入只更新引用、不重挂插件。
+ * 内置示例角色作为 `roles` 的 schema 默认值提供：零启动写入、无竞态，
+ * 用户编辑写入 user 层（profile patch）覆盖默认值。
+ *
+ * schemastery 无 null 类型：activeRole 以空串表示"未选择"（存储层），
+ * store 层内部仍用 null 语义，写入时序列化为空串。
+ */
+export const Config = z.object({
+  enabled: z.boolean().default(false).volatile(),
+  thinkingStyle: z.union(['neutral', 'role']).default('neutral').volatile(),
+  activeRole: z.string().default('').volatile(),
+  roles: z.array(RoleCardSchema).default(DEFAULT_ROLES).volatile(),
 })
 
-export const Config = z.object({})
-
-/** settings 命名空间名。 */
-export const COSPLAY_NAMESPACE = 'cosplay'
 /** 追加人格段的段名（与 persona 段名不同，避免同一层重复名冲突）。 */
 export const PERSONA_SECTION_ADDON = 'cosplay-persona'
 
@@ -105,20 +117,42 @@ const textOutput = {
   },
 }
 
-export function apply(ctx) {
-  const ns = COSPLAY_NAMESPACE
-  // 内置示例角色通过 composition base 层提供：零启动写入（避免装载期排队写入
-  // 命中被替换的注册）、无竞态；用户编辑写入 user 层覆盖 base。
-  ctx.settings.register(ns, CosplaySettingsSchema, {
-    base: { enabled: false, thinkingStyle: 'neutral', activeRole: DEFAULT_ROLES[0].id, roles: DEFAULT_ROLES },
-  })
+export function apply(ctx, config) {
+  const read = () =>
+    normalizeState({
+      enabled: config.enabled.get(),
+      thinkingStyle: config.thinkingStyle.get(),
+      activeRole: config.activeRole.get(),
+      roles: config.roles.get(),
+    })
 
-  const read = () => normalizeState(ctx.settings.get(ns))
+  // 写回：把完整 volatile 配置交给 config-editor 落盘（profile patch），
+  // Loader 随后原地更新 config 上的引用，所以 `read()` 立刻能看到新值。
+  // 没有 config-editor（如 headless 组合）时无法持久化 —— 引用也不会变，
+  // 必须显式报错，否则工具会谎报成功。
   const write = async (next) => {
-    // 序列化：activeRole 的 null 语义 → 空串（schema 无 null 类型）
-    await ctx.settings.replace(ns, { ...next, activeRole: next.activeRole ?? '' })
+    const entry = ctx.fiber?.entry
+    const editor = ctx.get('configEditor')
+    if (entry === undefined || editor === undefined) {
+      throw new Error('无法保存 Cosplay 配置：当前组合未提供配置编辑（configEditor）服务。')
+    }
+    await editor.edit(entry, (current) => ({
+      ...current,
+      enabled: next.enabled,
+      thinkingStyle: next.thinkingStyle,
+      // schema 无 null 类型：序列化为空串
+      activeRole: next.activeRole ?? '',
+      roles: next.roles,
+    }))
     return next
   }
+
+  // ── 设置页策略：本插件自带「角色扮演」页，关掉按 schema 自动生成的表单 ──
+  // 放在可选的 ctx.inject 子级里：Settings 迟到或被替换时策略依然生效，
+  // 且业务逻辑本身不依赖 Settings 即可运行。
+  ctx.inject(['settings'], (child) => {
+    child.effect(() => child.settings.configure({ auto: false }, ctx.fiber))
+  })
 
   // ── 人格注入（全局，随变量每次组装求值；含思维链指令，见 store.js） ──────
   // section order 表由 dsh-system-prompt 集中维护：deployment persona 在
@@ -140,7 +174,6 @@ export function apply(ctx) {
   }, 'dsh-cosplay: persona addon')
 
   // ── 内置 skill：自然语言创建角色卡（全局注册，模型可加载） ───────────────
-  // 0.1.2-rc.1 的 skills.register() 已内置 runtime provider，无需再显式传 source。
   ctx.skills.register({
     name: CARD_AUTHORING_SKILL_NAME,
     description: CARD_AUTHORING_SKILL_DESCRIPTION,

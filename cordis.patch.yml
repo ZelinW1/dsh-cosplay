@@ -2,12 +2,18 @@
 #
 # 形态（Round 3 决策）：全局开关，无独立预设、无预设行。
 # 单个主机行 cosplay-core 完成全部能力：
-#   - settings 命名空间 `cosplay`（开关 + 角色库，$DSH_HOME/settings.yaml）；
+#   - 状态即本行的 Config volatile 字段（开关 + 角色库），表单由 dsh 自带的
+#     settings 服务从插件 Config schema 投影生成，改动持久化到 profile patch
+#     的用户层（$DSH_HOME/profiles/<name>/cordis.patch.yml）；
 #   - 全局追加人格段 cosplay-persona + {{cosplay_active}} 变量（每次模型步骤
 #     求值：开关关 → 空串静默回退；开 → 激活角色卡）；
 #   - 全局 cosplay_* 工具（switch 在开关关闭时软禁用，管理工具始终可用）；
 #   - 浏览器侧设置页「角色扮演」（同一行经 package.json 的 dsh.client 声明
 #     自动装载 ./client）。
+#
+# 注意：下面的 id 是两侧的契约 —— 设置表单以 profile 条目 id 为键，
+# src/client.js 里的 COSPLAY_ENTRY_ID 必须与它一致（client.js 另有按字段形状
+# 的兜底匹配，但改名后请同步更新常量）。
 - insert:
     - id: cosplay-core
       name: 'dsh-cosplay'
