@@ -6,11 +6,13 @@
  *   - 角色库管理：列表 / 激活 / 新建 / 编辑 / 删除；
  *   - 角色卡字段：name / emoji / description / style / rules / greeting / sample。
  *
- * 数据通道：插件自有的 typert Remote 命名空间 `cosplay`（dsh-at-file 同款模式）
- * —— settings 命名空间对 Web 配置客户端有硬编码暴露白名单（dsh-host-apiproxy），
- * 第三方命名空间默认不可远程读写，因此设置页不走 settingsScope，而是
- * `ctx.remote.$mount({ package, descriptors })` + `ctx.reflect.get('remote.cosplay')`
- * 调用主机侧 @Remote 方法。codec 用 { mode: 'src-json' }，无需 zod。
+ * 数据通道：走标准 `ctx.remote.settings` 远程命名空间。
+ * 0.1.7 起 settings 表单以 **profile 条目 id** 为键（SettingsForms 把每个条目的
+ * Config schema 投影成表单），不再是自定义命名空间：
+ *   - 读：`remote.settings.describe()` → 在 `namespaces` 里按条目 id 定位本插件的
+ *     value/revision；
+ *   - 写：`remote.settings.update(ns, patch, revision)` 合并字段（数组整体替换）。
+ * 不需要插件自建 typert Remote 命名空间。
  *
  * 格式为 __ModuleLoader__ 的 CJS-factory 形式（与内置客户端包一致）。
  */
@@ -19,6 +21,29 @@ window.__ModuleLoader__.load({
   factory: (require) => {
     const React = require('react')
     const { useSyncExternalStore, useState, useCallback } = React
+
+    /**
+     * 主机侧组合行 id —— 必须与 cordis.patch.yml 里的 `id: cosplay-core` 一致。
+     * settings 表单以 profile 条目 id 为键，这个常量就是两侧的约定。
+     */
+    const COSPLAY_ENTRY_ID = 'cosplay-core'
+
+    /** 在 describe() 的命名空间列表里定位本插件的表单：优先精确匹配条目 id，
+     *  条目被改名时退化为按字段形状匹配（enabled + roles）。 */
+    function findCosplayView(namespaces) {
+      const list = Array.isArray(namespaces) ? namespaces : []
+      const byId = list.find((n) => n.ns === COSPLAY_ENTRY_ID)
+      if (byId !== undefined) return byId
+      return list.find((n) => {
+        const value = n.value
+        return (
+          value !== null &&
+          typeof value === 'object' &&
+          Array.isArray(value.roles) &&
+          typeof value.enabled === 'boolean'
+        )
+      })
+    }
 
     const EMPTY_FORM = { name: '', emoji: '', system_prompt: '', description: '', personality: '', style: '', rules: '', behavior: '', scenario: '', first_mes: '', mes_example: '', creator_notes: '' }
 
@@ -52,6 +77,106 @@ window.__ModuleLoader__.load({
       return role
     }
 
+    // ── 角色库纯函数（与主机侧 store.js 对齐） ─────────────────────────────────
+    function normalizeState(value) {
+      const v = value && typeof value === 'object' ? value : {}
+      const roles = Array.isArray(v.roles)
+        ? v.roles.filter((r) => r && typeof r === 'object' && typeof r.id === 'string' && typeof r.name === 'string')
+        : []
+      const activeRole = typeof v.activeRole === 'string' && roles.some((r) => r.id === v.activeRole) ? v.activeRole : null
+      return {
+        enabled: v.enabled === true,
+        thinkingStyle: v.thinkingStyle === 'role' ? 'role' : 'neutral',
+        activeRole,
+        roles,
+      }
+    }
+    function slugify(name) {
+      return String(name).trim().toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '')
+    }
+    function nextId(state, name) {
+      const base = slugify(name)
+      if (base && !state.roles.some((r) => r.id === base)) return base
+      const stamp = Date.now().toString(36)
+      const rand = Math.floor(Math.random() * 1296).toString(36)
+      return `${base || 'role'}-${stamp}${rand}`
+    }
+    function upsertRole(state, card) {
+      const name = typeof card.name === 'string' ? card.name.trim() : ''
+      if (!name) throw new Error('角色名不能为空')
+      const id = typeof card.id === 'string' && card.id ? card.id : nextId(state, name)
+      const exists = state.roles.some((r) => r.id === id)
+      const next = exists
+        ? { ...state, roles: state.roles.map((r) => (r.id === id ? { ...r, ...card, id, name } : r)) }
+        : { ...state, roles: [...state.roles, { ...card, id, name }] }
+      return next
+    }
+    function removeRole(state, id) {
+      return {
+        ...state,
+        roles: state.roles.filter((r) => r.id !== id),
+        activeRole: state.activeRole === id ? null : state.activeRole,
+      }
+    }
+    function setActiveRole(state, id) {
+      if (id === null) return { ...state, activeRole: null }
+      if (!state.roles.some((r) => r.id === id)) throw new Error(`角色不存在: ${id}`)
+      return { ...state, activeRole: id }
+    }
+
+    // ── settings 远程数据通道（profile 条目 id: cosplay-core） ───────────────
+    function createCosplayStore(getRemote) {
+      let snapshot = { status: 'loading', ns: undefined, value: undefined, revision: undefined, error: undefined }
+      const listeners = new Set()
+      const emit = () => { for (const listener of [...listeners]) listener() }
+      const set = (next) => { snapshot = next; emit() }
+      const remote = () => getRemote()?.settings
+      const load = async () => {
+        const r = remote()
+        if (r === undefined) { set({ status: 'unavailable', ns: undefined, value: undefined, revision: undefined, error: 'cosplay 设置通道未就绪' }); return }
+        try {
+          const res = await r.describe()
+          if (!res.ok) { set({ status: 'unavailable', ns: undefined, value: undefined, revision: undefined, error: res.error?.message ?? '读取失败' }); return }
+          const view = findCosplayView(res.value?.namespaces)
+          if (view === undefined) { set({ status: 'unavailable', ns: undefined, value: undefined, revision: undefined, error: `未找到 cosplay 配置条目（${COSPLAY_ENTRY_ID}）` }); return }
+          set({ status: 'ready', ns: view.ns, value: normalizeState(view.value), revision: view.revision, error: undefined })
+        } catch (error) {
+          set({ status: 'unavailable', ns: undefined, value: undefined, revision: undefined, error: String(error && error.message ? error.message : error) })
+        }
+      }
+      const write = async (applyFn) => {
+        const r = remote()
+        if (r === undefined) throw new Error('cosplay 设置通道未就绪')
+        const ns = snapshot.ns ?? COSPLAY_ENTRY_ID
+        const next = applyFn(normalizeState(snapshot.value ?? {}))
+        // 只发 volatile 字段；update 按字段合并（roles 数组整体替换）。
+        // 序列化：activeRole 的 null 语义 → 空串（schema 无 null 类型）
+        const patch = {
+          enabled: next.enabled,
+          thinkingStyle: next.thinkingStyle,
+          activeRole: next.activeRole ?? '',
+          roles: next.roles,
+        }
+        const res = await r.update(ns, patch, snapshot.revision)
+        if (!res.ok) {
+          if (res.error?.code === 'settings/conflict') await load()
+          throw new Error(res.error?.message ?? '写入失败')
+        }
+        set({ status: 'ready', ns, value: normalizeState(res.value?.value ?? next), revision: res.value?.revision ?? snapshot.revision, error: undefined })
+        return normalizeState(res.value?.value ?? next)
+      }
+      return {
+        subscribe: (listener) => { listeners.add(listener); return () => listeners.delete(listener) },
+        getSnapshot: () => snapshot,
+        load,
+        async setEnabled(enabled) { return write((s) => ({ ...s, enabled: enabled === true })) },
+        async setActiveRole(id) { return write((s) => setActiveRole(s, id)) },
+        async upsertRole(card) { return write((s) => upsertRole(s, card)) },
+        async removeRole(id) { return write((s) => removeRole(s, id)) },
+        async setThinkingStyle(style) { return write((s) => ({ ...s, thinkingStyle: style === 'role' ? 'role' : 'neutral' })) },
+      }
+    }
+
     const styles = {
       page: { display: 'flex', flexDirection: 'column', gap: '16px', padding: '4px 0', maxWidth: '720px' },
       card: { border: '1px solid var(--dsw-alias-border-strong, rgba(128,128,128,.3))', borderRadius: '12px', padding: '14px 16px', display: 'flex', flexDirection: 'column', gap: '10px' },
@@ -69,91 +194,27 @@ window.__ModuleLoader__.load({
       label: { fontSize: '12px', opacity: 0.6, minWidth: '64px' },
     }
 
-    // ── typert Remote 描述符（与主机侧 COSPLAY_INVOCATIONS 一致） ────────────
-    // 客户端挂载要求 strict codec（dsh-api-gateway 的 requireStrictCodec 拒绝
-    // src-json）；schema 用极简透传（{ parse: v => v }），免 zod。
-    const passthroughSchema = { parse: (value) => value }
-    const strictCodec = (typeSymbol) => ({ mode: 'strict', typeSymbol, schema: passthroughSchema })
-    const COSPLAY_INVOCATIONS = [
-      { id: 'dsh-cosplay#cosplay/getState', service: 'cosplay', namespace: 'cosplay', method: 'getState', invocation: { kind: 'direct' }, parameters: [], result: strictCodec('dsh-cosplay#CosplayState') },
-      { id: 'dsh-cosplay#cosplay/upsertRole', service: 'cosplay', namespace: 'cosplay', method: 'upsertRole', invocation: { kind: 'direct' }, parameters: [{ name: 'card', wire: 'card', source: 'json', codec: strictCodec('dsh-cosplay#RoleCard') }], result: strictCodec('dsh-cosplay#CosplayState') },
-      { id: 'dsh-cosplay#cosplay/removeRole', service: 'cosplay', namespace: 'cosplay', method: 'removeRole', invocation: { kind: 'direct' }, parameters: [{ name: 'id', wire: 'id', source: 'json', codec: strictCodec('dsh-cosplay#RoleId') }], result: strictCodec('dsh-cosplay#CosplayState') },
-      { id: 'dsh-cosplay#cosplay/setActiveRole', service: 'cosplay', namespace: 'cosplay', method: 'setActiveRole', invocation: { kind: 'direct' }, parameters: [{ name: 'id', wire: 'id', source: 'json', codec: strictCodec('dsh-cosplay#RoleId') }], result: strictCodec('dsh-cosplay#CosplayState') },
-      { id: 'dsh-cosplay#cosplay/setEnabled', service: 'cosplay', namespace: 'cosplay', method: 'setEnabled', invocation: { kind: 'direct' }, parameters: [{ name: 'enabled', wire: 'enabled', source: 'json', codec: strictCodec('dsh-cosplay#Enabled') }], result: strictCodec('dsh-cosplay#CosplayState') },
-      { id: 'dsh-cosplay#cosplay/setThinkingStyle', service: 'cosplay', namespace: 'cosplay', method: 'setThinkingStyle', invocation: { kind: 'direct' }, parameters: [{ name: 'style', wire: 'style', source: 'json', codec: strictCodec('dsh-cosplay#ThinkingStyle') }], result: strictCodec('dsh-cosplay#CosplayState') },
-    ]
-    const COSPLAY_REMOTE = { package: 'dsh-cosplay', descriptors: COSPLAY_INVOCATIONS }
-
-    /** 挂载后返回 Remote 命名空间；未就绪返回 undefined。 */
-    function createCosplayStore(getRemote) {
-      let snapshot = { status: 'loading', value: undefined }
-      const listeners = new Set()
-      const emit = () => {
-        for (const listener of [...listeners]) listener()
-      }
-      const settle = (next) => {
-        snapshot = next
-        emit()
-      }
-      const call = async (fn) => {
-        const remote = getRemote()
-        if (remote === undefined) {
-          settle({ status: 'unavailable', value: undefined, error: 'cosplay Remote 未挂载' })
-          return undefined
-        }
-        try {
-          return await fn(remote)
-        } catch (error) {
-          settle({ status: 'unavailable', value: undefined, error: String(error && error.message ? error.message : error) })
-          return undefined
-        }
-      }
-      return {
-        subscribe: (listener) => {
-          listeners.add(listener)
-          return () => listeners.delete(listener)
-        },
-        getSnapshot: () => snapshot,
-        async load() {
-          const res = await call((r) => r.getState())
-          if (res === undefined) return
-          if (res.ok) settle({ status: 'ready', value: res.value })
-          else settle({ status: 'unavailable', value: undefined, error: res.error?.message ?? '读取失败' })
-        },
-        /** 执行一次写操作；成功后用返回值刷新快照。 */
-        async mutate(fn) {
-          const res = await call(fn)
-          if (res === undefined) return undefined
-          if (res.ok) {
-            settle({ status: 'ready', value: res.value })
-            return res.value
-          }
-          throw new Error(res.error?.message ?? '写入失败')
-        },
-      }
-    }
-
     return {
       name: 'cosplay-client',
-      inject: ['remote', 'slots', 'connection'],
+      inject: ['slots', 'remote', 'remote.settings'],
       apply(ctx) {
-        let cosplayRemote = undefined
-        const store = createCosplayStore(() => cosplayRemote)
         const slots = ctx.get('slots')
         if (slots === undefined) return
-        ctx.effect(async () => {
-          const dispose = await ctx.remote.$mount(COSPLAY_REMOTE)
-          cosplayRemote = ctx.reflect.get('remote.cosplay')
-          if (cosplayRemote === undefined) {
-            throw new Error('dsh-cosplay: the cosplay Remote namespace did not mount')
-          }
-          void store.load()
-          return dispose
-        }, 'dsh-cosplay: remote mount')
+        const store = createCosplayStore(() => ctx.remote)
+        // 订阅 settings 文档变更，保持页面新鲜（描述镜像由主机侧推送）。
+        // 事件带 (ns, revision)：只关心本插件条目，别的表单写入不必触发重读。
+        ctx.effect(
+          () => ctx.remote.$on('settings/document-updated', (ns) => {
+            const current = store.getSnapshot().ns
+            if (ns === undefined || current === undefined || ns === current) store.load()
+          }),
+          'dsh-cosplay: settings mirror',
+        )
+        store.load()
         slots.inject('settings.section', () =>
           slots.register(
-            { name: 'settings.section', id: 'cosplay', order: 100, label: '角色扮演' },
-            () => React.createElement(CosplaySection, { store }),
+            { name: 'settings.section', id: 'cosplay', order: 100, label: () => '角色扮演', inject: () => ({ store }) },
+            CosplaySection,
           ),
         )
       },
@@ -179,7 +240,7 @@ window.__ModuleLoader__.load({
       }, [])
 
       const reportError = useCallback((error) => {
-        if (typeof window !== 'undefined') window.alert(error.message)
+        if (typeof window !== 'undefined') window.alert(error?.message ?? String(error))
       }, [])
 
       const save = useCallback(async () => {
@@ -187,14 +248,14 @@ window.__ModuleLoader__.load({
         try {
           const card = { ...form, name: form.name.trim() }
           if (editingId) card.id = editingId
-          await store.mutate((r) => r.upsertRole(card))
-          if (!editingId && !value?.activeRole) await store.mutate((r) => r.setActiveRole(card.id ?? null))
+          const next = await store.upsertRole(card)
+          if (!editingId && !next.activeRole) await store.setActiveRole(card.id ?? null)
           setEditingId(null)
           setForm(EMPTY_FORM)
         } catch (error) {
           reportError(error)
         }
-      }, [form, editingId, value, store, reportError])
+      }, [form, editingId, store, reportError])
 
       const exportRole = useCallback(async (role) => {
         const json = JSON.stringify(toV2Card(role), null, 2)
@@ -212,14 +273,14 @@ window.__ModuleLoader__.load({
         try {
           const text = await file.text()
           const card = fromV2Card(JSON.parse(text))
-          // id 冲突确认：相同 id 默认覆盖；取消则去掉 id 新建（不覆盖）
-          if (card.id && (value?.roles ?? []).some((r) => r.id === card.id)) {
+          const roles = value?.roles ?? []
+          if (card.id && roles.some((r) => r.id === card.id)) {
             if (typeof window !== 'undefined' && !window.confirm(`角色「${card.name}」(id=${card.id}) 已存在。\n确定 = 覆盖现有角色\n取消 = 作为新角色导入`)) {
               delete card.id
             }
           }
-          await store.mutate((r) => r.upsertRole(card))
-          if (!value?.activeRole) await store.mutate((r) => r.setActiveRole(card.id ?? null))
+          const next = await store.upsertRole(card)
+          if (!next.activeRole) await store.setActiveRole(card.id ?? null)
           if (importFileRef.current) importFileRef.current.value = ''
         } catch (error) {
           reportError(error)
@@ -229,7 +290,7 @@ window.__ModuleLoader__.load({
       const remove = useCallback(async (id) => {
         if (typeof window !== 'undefined' && !window.confirm(`确定删除角色 ${id} 吗？`)) return
         try {
-          await store.mutate((r) => r.removeRole(id))
+          await store.removeRole(id)
         } catch (error) {
           reportError(error)
         }
@@ -237,7 +298,7 @@ window.__ModuleLoader__.load({
 
       const setActive = useCallback(async (id) => {
         try {
-          await store.mutate((r) => r.setActiveRole(id))
+          await store.setActiveRole(id)
         } catch (error) {
           reportError(error)
         }
@@ -245,7 +306,7 @@ window.__ModuleLoader__.load({
 
       const toggle = useCallback(async () => {
         try {
-          await store.mutate((r) => r.setEnabled(!(value?.enabled === true)))
+          await store.setEnabled(!(value?.enabled === true))
         } catch (error) {
           reportError(error)
         }
@@ -253,7 +314,7 @@ window.__ModuleLoader__.load({
 
       const setThinkingStyle = useCallback(async (style) => {
         try {
-          await store.mutate((r) => r.setThinkingStyle(style))
+          await store.setThinkingStyle(style)
         } catch (error) {
           reportError(error)
         }
@@ -266,7 +327,7 @@ window.__ModuleLoader__.load({
         return React.createElement(
           'div',
           { style: styles.hint },
-          `角色库不可用：cosplay Remote 通道未就绪。${snapshot.error ? `（${snapshot.error}）` : ''}`,
+          `角色库不可用：cosplay 设置通道未就绪。${snapshot.error ? `（${snapshot.error}）` : ''}`,
         )
       }
 

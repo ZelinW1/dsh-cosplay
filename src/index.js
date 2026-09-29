@@ -2,25 +2,32 @@
  * dsh-cosplay — 主机侧核心插件（组合行 id: cosplay-core）。
  *
  * 形态：全局开关（Round 3 决策）。
- *   - 注册 settings 命名空间 `cosplay`（角色库 + 开关，$DSH_HOME/settings.yaml，
- *     热重载、schema 校验、revision 栅栏写入；内置示例角色经 composition base
- *     层提供，零启动写入）；
- *   - 提供 `cosplay` 服务（角色 CRUD / 激活 / 开关）；
+ *   - 状态即插件自身 Config 的 volatile 字段（enabled / thinkingStyle /
+ *     activeRole / roles）：0.1.7 起 settings 不再是「自定义命名空间注册表」，
+ *     而是把每个 profile 条目**自己的 Config schema** 投影成表单
+ *     （SettingsForms）。可编辑字段标 `.volatile()` 后写入不触发插件重挂，
+ *     Loader 走 volatile-only 路径原地更新引用（`loader/volatile-update`）。
+ *     表单读写与持久化仍由 dsh 自带的 settings / config-editor 承担，
+ *     插件不自建 typert Remote。
+ *   - 读：`apply(ctx, config)` 的 config 里 volatile 字段是稳定引用，
+ *     `config.<field>.get()` 取当前快照 —— 开关 / 换角色下一模型步骤即生效，
+ *     无需重建会话。
+ *   - 写：`ctx.get('configEditor').edit(entry, ...)` 把完整 volatile 配置写回
+ *     profile patch（$DSH_HOME/profiles/<name>/cordis.patch.yml）。
  *   - 注册**全局**追加人格段 `cosplay-persona`（位于 persona 之后）与
  *     `{{cosplay_active}}` 变量：变量每次模型步骤组装时求值，开关关闭时渲染
- *     空串（人格静默回退），开启时渲染激活角色卡 —— 开/关/换角色下一模型步骤
- *     即生效，无需重建会话；
+ *     空串（人格静默回退），开启时渲染激活角色卡。
  *   - 注册**全局** `cosplay_*` 工具：`cosplay_switch` 在开关关闭时软禁用
  *     （提示先开启）；角色库管理工具（list/show/upsert/remove）始终可用。
  *
  * 本行是纯主机平面：不依赖任何 preset。全局生效范围含所有会话与子代理
  * （Round 3 已与用户确认）。
+ *
+ * 兼容性：0.1.7-alpha.2 起。0.1.5 及更早版本的 `ctx.settings.register/get`
+ * 命名空间 API 已被移除，本插件不再支持那些版本。
  */
 import z from '@deepseek-ai/schemastery'
-import { settingsNamespace } from '@deepseek-ai/dsh-settings'
-import { PERSONA_ORDER } from '@deepseek-ai/dsh-system-prompt'
 import { defineTool } from '@deepseek-ai/dsh-tools'
-import { Remote, TypertRemoteService } from '@deepseek-ai/dsh-typert-protocol'
 import {
   normalizeState,
   DEFAULT_ROLES,
@@ -29,8 +36,8 @@ import {
   setActiveRole,
   findRole,
   nextId,
-  renderActivePersona,
   renderPersona,
+  renderActivePersona,
 } from './store.js'
 
 import {
@@ -41,7 +48,7 @@ import {
 } from './skill.js'
 
 export const name = 'cosplay-core'
-export const inject = ['settings', 'systemPrompt', 'tools', 'typert', 'skills']
+export const inject = ['systemPrompt', 'tools', 'skills']
 
 const RoleCardSchema = z.object({
   id: z.string().required(),
@@ -65,19 +72,43 @@ const RoleCardSchema = z.object({
   behavior: z.string().default(''),
 })
 
-// schemastery 无 null 类型：activeRole 以空串表示"未选择"（存储层），
-// store 层内部仍用 null 语义，写入时序列化为空串。
-const CosplaySettingsSchema = z.object({
-  enabled: z.boolean().default(false),
-  thinkingStyle: z.union(['neutral', 'role']).default('neutral'),
-  activeRole: z.string().default(''),
-  roles: z.array(RoleCardSchema).default([]),
+/**
+ * 插件配置 = 角色库状态（0.1.7 起设置页由此投影生成）。
+ *
+ * 四个字段全部 `.volatile()`：设置页可编辑，写入只更新引用、不重挂插件。
+ * 内置示例角色作为 `roles` 的 schema 默认值提供：零启动写入、无竞态，
+ * 用户编辑写入 user 层（profile patch）覆盖默认值。
+ *
+ * schemastery 无 null 类型：activeRole 以空串表示"未选择"（存储层），
+ * store 层内部仍用 null 语义，写入时序列化为空串。
+ */
+export const Config = z.object({
+  enabled: z.boolean().default(false).volatile(),
+  thinkingStyle: z.union(['neutral', 'role']).default('neutral').volatile(),
+  activeRole: z.string().default('').volatile(),
+  roles: z.array(RoleCardSchema).default(DEFAULT_ROLES).volatile(),
 })
-
-export const Config = z.object({})
 
 /** 追加人格段的段名（与 persona 段名不同，避免同一层重复名冲突）。 */
 export const PERSONA_SECTION_ADDON = 'cosplay-persona'
+
+/**
+ * persona 段基准 order（跨版本兼容）。
+ *
+ * 0.1.2-rc.1 的 section order 表用 `DEPLOYMENT_PERSONA`（=0）；0.1.5-rc.1 把它
+ * 拆成 `DEPLOYMENT_PERSONA_PREFIX`（=0）与 `DEPLOYMENT_PERSONA_SUFFIX`（=10200）。
+ * `getSectionOrder()` 对未知 key 返回 undefined：参与加法得到 NaN 后，
+ * `section()` 的 `order must be a finite number` 检查会抛 TypeError，插件在
+ * apply 阶段直接装载失败。因此按版本逐个回退，全都不认识时退回 0
+ * （等价于旧版 persona 段的位置）。
+ */
+function resolvePersonaOrder(systemPrompt) {
+  for (const key of ['DEPLOYMENT_PERSONA_PREFIX', 'DEPLOYMENT_PERSONA']) {
+    const order = systemPrompt.getSectionOrder(key)
+    if (Number.isFinite(order)) return order
+  }
+  return 0
+}
 
 const textOutput = {
   schema: { type: 'string' },
@@ -86,193 +117,68 @@ const textOutput = {
   },
 }
 
-// ── typert Remote（浏览器设置页的数据通道） ─────────────────────────────────
-// settings 命名空间对 Web 配置客户端有硬编码暴露白名单（dsh-host-apiproxy 的
-// WEB/PRODUCT_SETTINGS_NAMESPACES，第三方命名空间默认不可远程读写），因此
-// 设置页改走插件自有的 Typert Remote 通道（dsh-at-file 同款模式）。codec 使用
-// { mode: 'src-json' }，无需 zod schema。
+export function apply(ctx, config) {
+  const read = () =>
+    normalizeState({
+      enabled: config.enabled.get(),
+      thinkingStyle: config.thinkingStyle.get(),
+      activeRole: config.activeRole.get(),
+      roles: config.roles.get(),
+    })
 
-/**
- * 以纯 JS 应用 TC39 现代装饰器 @Remote：
- * addMarkerInitializer 要求 context.addInitializer(fn)，fn 以实例为 this 执行，
- * 取 Object.getPrototypeOf(instance)（= 本类原型）写入 typert 内部 marker 表。
- */
-function markRemoteMethod(proto, methodName) {
-  const probe = Object.create(proto)
-  Remote(proto[methodName], {
-    kind: 'method',
-    name: methodName,
-    static: false,
-    private: false,
-    addInitializer(fn) {
-      fn.call(probe)
-    },
-  })
-}
-
-/** 设置页可用的角色库读写服务（Remote 命名空间 `cosplay`）。 */
-class CosplayRuntime extends TypertRemoteService {
-  constructor(ctx, read, write) {
-    super(ctx, 'cosplay')
-    this._read = read
-    this._write = write
-  }
-  getState() {
-    return this._read()
-  }
-  async upsertRole(card) {
-    return this._write(upsertRole(this._read(), card))
-  }
-  async removeRole(id) {
-    return this._write(removeRole(this._read(), id))
-  }
-  async setActiveRole(id) {
-    // id 为 null 表示退出扮演（写入层序列化为空串）
-    return this._write(setActiveRole(this._read(), id))
-  }
-  async setEnabled(enabled) {
-    return this._write({ ...this._read(), enabled: enabled === true })
-  }
-  async setThinkingStyle(style) {
-    const next = style === 'role' ? 'role' : 'neutral'
-    return this._write({ ...this._read(), thinkingStyle: next })
-  }
-}
-for (const method of ['getState', 'upsertRole', 'removeRole', 'setActiveRole', 'setEnabled', 'setThinkingStyle']) {
-  markRemoteMethod(CosplayRuntime.prototype, method)
-}
-
-/** strict codec 的极简 schema：透传校验（免 zod）。 */
-const passthroughSchema = { parse: (value) => value }
-const strictCodec = (typeSymbol) => ({ mode: 'strict', typeSymbol, schema: passthroughSchema })
-
-const COSPLAY_INVOCATIONS = [
-  {
-    id: 'dsh-cosplay#cosplay/getState',
-    service: 'cosplay',
-    namespace: 'cosplay',
-    method: 'getState',
-    invocation: { kind: 'direct' },
-    parameters: [],
-    result: strictCodec('dsh-cosplay#CosplayState'),
-  },
-  {
-    id: 'dsh-cosplay#cosplay/upsertRole',
-    service: 'cosplay',
-    namespace: 'cosplay',
-    method: 'upsertRole',
-    invocation: { kind: 'direct' },
-    parameters: [{ name: 'card', wire: 'card', source: 'json', codec: strictCodec('dsh-cosplay#RoleCard') }],
-    result: strictCodec('dsh-cosplay#CosplayState'),
-  },
-  {
-    id: 'dsh-cosplay#cosplay/removeRole',
-    service: 'cosplay',
-    namespace: 'cosplay',
-    method: 'removeRole',
-    invocation: { kind: 'direct' },
-    parameters: [{ name: 'id', wire: 'id', source: 'json', codec: strictCodec('dsh-cosplay#RoleId') }],
-    result: strictCodec('dsh-cosplay#CosplayState'),
-  },
-  {
-    id: 'dsh-cosplay#cosplay/setActiveRole',
-    service: 'cosplay',
-    namespace: 'cosplay',
-    method: 'setActiveRole',
-    invocation: { kind: 'direct' },
-    parameters: [{ name: 'id', wire: 'id', source: 'json', codec: strictCodec('dsh-cosplay#RoleId') }],
-    result: strictCodec('dsh-cosplay#CosplayState'),
-  },
-  {
-    id: 'dsh-cosplay#cosplay/setEnabled',
-    service: 'cosplay',
-    namespace: 'cosplay',
-    method: 'setEnabled',
-    invocation: { kind: 'direct' },
-    parameters: [{ name: 'enabled', wire: 'enabled', source: 'json', codec: strictCodec('dsh-cosplay#Enabled') }],
-    result: strictCodec('dsh-cosplay#CosplayState'),
-  },
-  {
-    id: 'dsh-cosplay#cosplay/setThinkingStyle',
-    service: 'cosplay',
-    namespace: 'cosplay',
-    method: 'setThinkingStyle',
-    invocation: { kind: 'direct' },
-    parameters: [{ name: 'style', wire: 'style', source: 'json', codec: strictCodec('dsh-cosplay#ThinkingStyle') }],
-    result: strictCodec('dsh-cosplay#CosplayState'),
-  },
-]
-
-const COSPLAY_MEMBERS = [
-  { kind: 'method', name: 'getState', signature: 'getState(): CosplayState' },
-  { kind: 'method', name: 'upsertRole', signature: 'upsertRole(card: RoleCard): Promise<CosplayState>' },
-  { kind: 'method', name: 'removeRole', signature: 'removeRole(id: string): Promise<CosplayState>' },
-  { kind: 'method', name: 'setActiveRole', signature: 'setActiveRole(id: string | null): Promise<CosplayState>' },
-  { kind: 'method', name: 'setEnabled', signature: 'setEnabled(enabled: boolean): Promise<CosplayState>' },
-  { kind: 'method', name: 'setThinkingStyle', signature: 'setThinkingStyle(style: "neutral" | "role"): Promise<CosplayState>' },
-]
-
-const TYPERT_MANIFEST = {
-  package: 'dsh-cosplay',
-  face: 'host',
-  schemas: [],
-  model: {
-    services: [
-      {
-        key: 'cosplay',
-        exportName: 'CosplayRuntime',
-        description: 'Cosplay 角色库与开关（dsh-cosplay 设置页数据通道）。',
-        tags: [],
-        members: COSPLAY_MEMBERS,
-      },
-    ],
-    events: [],
-    objects: [],
-  },
-  invocations: COSPLAY_INVOCATIONS,
-}
-
-export function apply(ctx) {
-  const ns = settingsNamespace('cosplay')
-  // 内置示例角色通过 composition base 层提供：零启动写入（避免装载期排队写入
-  // 命中被替换的注册）、无竞态；用户编辑写入 user 层覆盖 base。
-  ctx.settings.register(ns, CosplaySettingsSchema, {
-    base: { enabled: false, thinkingStyle: 'neutral', activeRole: DEFAULT_ROLES[0].id, roles: DEFAULT_ROLES },
-  })
-
-  const read = () => normalizeState(ctx.settings.get(ns))
+  // 写回：把完整 volatile 配置交给 config-editor 落盘（profile patch），
+  // Loader 随后原地更新 config 上的引用，所以 `read()` 立刻能看到新值。
+  // 没有 config-editor（如 headless 组合）时无法持久化 —— 引用也不会变，
+  // 必须显式报错，否则工具会谎报成功。
   const write = async (next) => {
-    // 序列化：activeRole 的 null 语义 → 空串（schema 无 null 类型）
-    await ctx.settings.replace(ns, { ...next, activeRole: next.activeRole ?? '' })
+    const entry = ctx.fiber?.entry
+    const editor = ctx.get('configEditor')
+    if (entry === undefined || editor === undefined) {
+      throw new Error('无法保存 Cosplay 配置：当前组合未提供配置编辑（configEditor）服务。')
+    }
+    await editor.edit(entry, (current) => ({
+      ...current,
+      enabled: next.enabled,
+      thinkingStyle: next.thinkingStyle,
+      // schema 无 null 类型：序列化为空串
+      activeRole: next.activeRole ?? '',
+      roles: next.roles,
+    }))
     return next
   }
 
-  // ── typert Remote（设置页数据通道；同时注册 `cosplay` 服务） ───────────────
-  new CosplayRuntime(ctx, read, write)
-  ctx.effect(() => {
-    const dispose = ctx.typert.register(TYPERT_MANIFEST)
-    return () => {
-      void dispose()
-    }
-  }, 'dsh-cosplay: typert manifest')
-
-  // ── 人格注入（全局，随变量每次组装求值；含思维链指令，见 store.js） ──────
-  ctx.systemPrompt.variable('cosplay_active', () => renderActivePersona(read()))
-  ctx.systemPrompt.section({
-    name: PERSONA_SECTION_ADDON,
-    order: PERSONA_ORDER + 1,
-    text: '{{cosplay_active}}',
+  // ── 设置页策略：本插件自带「角色扮演」页，关掉按 schema 自动生成的表单 ──
+  // 放在可选的 ctx.inject 子级里：Settings 迟到或被替换时策略依然生效，
+  // 且业务逻辑本身不依赖 Settings 即可运行。
+  ctx.inject(['settings'], (child) => {
+    child.effect(() => child.settings.configure({ auto: false }, ctx.fiber))
   })
 
+  // ── 人格注入（全局，随变量每次组装求值；含思维链指令，见 store.js） ──────
+  // section order 表由 dsh-system-prompt 集中维护：deployment persona 在
+  // 0.1.2-rc.1 是 DEPLOYMENT_PERSONA（=0），0.1.5-rc.1 拆成
+  // DEPLOYMENT_PERSONA_PREFIX（=0）/ DEPLOYMENT_PERSONA_SUFFIX（=10200）；
+  // cosplay 人格段始终紧随 persona 前缀之后（见 resolvePersonaOrder）。
+  // section()/variable() 已返回 disposer，这里包进 ctx.effect 以便热重载清理。
+  ctx.effect(() => {
+    const disposeVariable = ctx.systemPrompt.variable('cosplay_active', () => renderActivePersona(read()))
+    const disposeSection = ctx.systemPrompt.section({
+      name: PERSONA_SECTION_ADDON,
+      order: resolvePersonaOrder(ctx.systemPrompt) + 1,
+      text: '{{cosplay_active}}',
+    })
+    return () => {
+      disposeVariable()
+      disposeSection()
+    }
+  }, 'dsh-cosplay: persona addon')
+
   // ── 内置 skill：自然语言创建角色卡（全局注册，模型可加载） ───────────────
-  // source 必须显式提供：register() 只默认 invocation/provider，加载路径会
-  // 校验 source 必须为字符串（缺失报 "loaded skill ... source must be a string"）。
   ctx.skills.register({
     name: CARD_AUTHORING_SKILL_NAME,
     description: CARD_AUTHORING_SKILL_DESCRIPTION,
     whenToUse: CARD_AUTHORING_SKILL_WHEN_TO_USE,
     content: CARD_AUTHORING_SKILL_CONTENT,
-    source: 'runtime',
   })
 
   // ── 全局工具（模式门控：开关关闭时 switch 软禁用） ────────────────────────
@@ -373,7 +279,4 @@ export function apply(ctx) {
       return `已删除角色 ${args.id}。`
     },
   }))
-
-  // TEMP-DIAG: 激活标记（定位后移除）
-  console.log('[dsh-cosplay] cosplay-core activated; typert manifest registered')
 }

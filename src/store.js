@@ -8,12 +8,14 @@
  *   - 插件特有字段（id/emoji/style/rules/behavior）归入 v2 的
  *     extensions.dshCosplay（导入导出时随卡携带，酒馆等工具忽略它不受影响）。
  *
- * 角色库以 settings 命名空间 `cosplay` 的用户层文档存储（$DSH_HOME/settings.yaml）：
- *   cosplay:
- *     enabled: boolean        # 全局开关（默认 false，opt-in）
- *     thinkingStyle: neutral|role  # 思考风格（全局）
- *     activeRole: string|''   # 当前激活角色（空串=未选择）
- *     roles: [ RoleCard ]
+ * 角色库即插件自身 Config 的 volatile 字段（见 index.js 的 Config），持久化在
+ * profile patch 的用户层（$DSH_HOME/profiles/<name>/cordis.patch.yml）：
+ *   - id: cosplay-core
+ *     config:
+ *       enabled: boolean             # 全局开关（默认 false，opt-in）
+ *       thinkingStyle: neutral|role  # 思考风格（全局）
+ *       activeRole: string|''        # 当前激活角色（空串=未选择）
+ *       roles: [ RoleCard ]
  */
 
 /** 随插件内置的唯一默认角色：蓝色大肥鱼（基于用户提供的 [PERSONA_LOAD] 指令块整理）。 */
