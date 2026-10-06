@@ -1,6 +1,6 @@
 {
   "name": "dsh-cosplay",
-  "version": "0.4.0",
+  "version": "0.5.0",
   "description": "Cosplay mode for DeepSeek Harness: a global switch turns the agent into any character you define, with a settings UI for role configuration and management.",
   "repository": {
     "type": "git",
@@ -18,7 +18,9 @@
     "cordis.patch.yml"
   ],
   "scripts": {
-    "check": "node --check src/store.js && node --check src/index.js && node --check src/client.js && node --check src/skill.js"
+    "check": "node --check src/store.js && node --check src/index.js && node --check src/client.js && node --check src/skill.js",
+    "test": "node test/host-stub.test.mjs",
+    "verify:client": "node test/tools/settings-check.mjs"
   },
   "keywords": [
     "dsh",
@@ -35,11 +37,8 @@
     },
     "client": {
       "platform": "web",
-      "inject": [
-        "@deepseek-ai/dsh-client-runtime",
-        "@deepseek-ai/dsh-client-connection",
-        "@deepseek-ai/dsh-api-remotes"
-      ]
+      "inject": [],
+      "external": []
     }
   },
   "dependencies": {
@@ -47,10 +46,10 @@
   },
   "peerDependencies": {
     "@deepseek-ai/cordis": "^4.0.1",
-    "@deepseek-ai/dsh-home-paths": "^0.1.0-rc.6",
-    "@deepseek-ai/dsh-settings": "^0.1.0-rc.6",
-    "@deepseek-ai/dsh-system-prompt": "^0.1.0-rc.6",
-    "@deepseek-ai/dsh-tools": "^0.1.0-rc.6",
-    "@deepseek-ai/dsh-typert-protocol": "^0.1.0-rc.6"
+    "@deepseek-ai/dsh-home-paths": "^0.2.0-rc.2",
+    "@deepseek-ai/dsh-settings": "^0.2.0-rc.2",
+    "@deepseek-ai/dsh-system-prompt": "^0.2.0-rc.2",
+    "@deepseek-ai/dsh-tools": "^0.2.0-rc.2",
+    "@deepseek-ai/dsh-typert-protocol": "^0.2.0-rc.2"
   }
 }

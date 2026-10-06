@@ -6,13 +6,17 @@
  *   - 角色库管理：列表 / 激活 / 新建 / 编辑 / 删除；
  *   - 角色卡字段：name / emoji / description / style / rules / greeting / sample。
  *
- * 数据通道：插件自有的 typert Remote 命名空间 `cosplay`（dsh-at-file 同款模式）
- * —— settings 命名空间对 Web 配置客户端有硬编码暴露白名单（dsh-host-apiproxy），
- * 第三方命名空间默认不可远程读写，因此设置页不走 settingsScope，而是
- * `ctx.remote.$mount({ package, descriptors })` + `ctx.reflect.get('remote.cosplay')`
- * 调用主机侧 @Remote 方法。codec 用 { mode: 'src-json' }，无需 zod。
+ * 数据通道：插件自有的 typert Remote 命名空间 `cosplay`。
+ * 0.2.x 的三条硬约束（依据 dsh-api-gateway / dsh-typert-registry / dsh-client-modules
+ * 的实现，勿凭 0.1.x 记忆修改）：
+ *   1. 描述符的**参数** codec 必须是 `strict` 且带 `typeSymbol` 与 `create` 工厂，
+ *      否则客户端 `requireStrictInputs` 会让 `$mount` 抛错；result 可用 `src-json`。
+ *   2. 挂载必须由 async `apply` 自身 await 并 return disposer；**不要**包在
+ *      `ctx.effect(async () => ...)` 里——那里抛出的 rejection 会被 cordis 静默吞掉。
+ *   3. 挂载后直接用 `ctx.remote.cosplay` 取命名空间；**不要**在本插件 inject
+ *      `remote.cosplay`（自挂自取会自依赖死锁）。
  *
- * 格式为 __ModuleLoader__ 的 CJS-factory 形式（与内置客户端包一致）。
+ * 格式为 __ModuleLoader__ 的 CJS-factory 形式（id 必须等于包名，与内置客户端包一致）。
  */
 window.__ModuleLoader__.load({
   id: 'dsh-cosplay',
@@ -69,18 +73,22 @@ window.__ModuleLoader__.load({
       label: { fontSize: '12px', opacity: 0.6, minWidth: '64px' },
     }
 
-    // ── typert Remote 描述符（与主机侧 COSPLAY_INVOCATIONS 一致） ────────────
-    // 客户端挂载要求 strict codec（dsh-api-gateway 的 requireStrictCodec 拒绝
-    // src-json）；schema 用极简透传（{ parse: v => v }），免 zod。
-    const passthroughSchema = { parse: (value) => value }
-    const strictCodec = (typeSymbol) => ({ mode: 'strict', typeSymbol, schema: passthroughSchema })
+    // ── typert Remote 描述符（参数与主机侧一致，result 走 src-json） ──────────
+    // 0.2.x 客户端描述符契约（两条都踩过坑，勿改）：
+    //   - **参数** codec 必须是 strict（dsh-api-gateway 的 requireStrictInputs 对每个
+    //     参数断言 mode === 'strict'，否则 $mount 直接抛错）。create() 在客户端只作
+    //     校验令牌、永不被调用（客户端走独立 DescriptorStore，不写 packages/schemas），
+    //     因此 `() => ({})` 即可。
+    //   - **result** 可以是 src-json：宿主对 src-json 一直放行，客户端也不解码结果。
+    const strictCodec = (typeSymbol) => ({ mode: 'strict', typeSymbol, create: () => ({}) })
+    const resultCodec = (typeSymbol) => ({ mode: 'src-json', typeSymbol })
     const COSPLAY_INVOCATIONS = [
-      { id: 'dsh-cosplay#cosplay/getState', service: 'cosplay', namespace: 'cosplay', method: 'getState', invocation: { kind: 'direct' }, parameters: [], result: strictCodec('dsh-cosplay#CosplayState') },
-      { id: 'dsh-cosplay#cosplay/upsertRole', service: 'cosplay', namespace: 'cosplay', method: 'upsertRole', invocation: { kind: 'direct' }, parameters: [{ name: 'card', wire: 'card', source: 'json', codec: strictCodec('dsh-cosplay#RoleCard') }], result: strictCodec('dsh-cosplay#CosplayState') },
-      { id: 'dsh-cosplay#cosplay/removeRole', service: 'cosplay', namespace: 'cosplay', method: 'removeRole', invocation: { kind: 'direct' }, parameters: [{ name: 'id', wire: 'id', source: 'json', codec: strictCodec('dsh-cosplay#RoleId') }], result: strictCodec('dsh-cosplay#CosplayState') },
-      { id: 'dsh-cosplay#cosplay/setActiveRole', service: 'cosplay', namespace: 'cosplay', method: 'setActiveRole', invocation: { kind: 'direct' }, parameters: [{ name: 'id', wire: 'id', source: 'json', codec: strictCodec('dsh-cosplay#RoleId') }], result: strictCodec('dsh-cosplay#CosplayState') },
-      { id: 'dsh-cosplay#cosplay/setEnabled', service: 'cosplay', namespace: 'cosplay', method: 'setEnabled', invocation: { kind: 'direct' }, parameters: [{ name: 'enabled', wire: 'enabled', source: 'json', codec: strictCodec('dsh-cosplay#Enabled') }], result: strictCodec('dsh-cosplay#CosplayState') },
-      { id: 'dsh-cosplay#cosplay/setThinkingStyle', service: 'cosplay', namespace: 'cosplay', method: 'setThinkingStyle', invocation: { kind: 'direct' }, parameters: [{ name: 'style', wire: 'style', source: 'json', codec: strictCodec('dsh-cosplay#ThinkingStyle') }], result: strictCodec('dsh-cosplay#CosplayState') },
+      { id: 'dsh-cosplay#cosplay/getState', service: 'cosplay', namespace: 'cosplay', method: 'getState', invocation: { kind: 'direct' }, parameters: [], result: resultCodec('dsh-cosplay#CosplayState') },
+      { id: 'dsh-cosplay#cosplay/upsertRole', service: 'cosplay', namespace: 'cosplay', method: 'upsertRole', invocation: { kind: 'direct' }, parameters: [{ name: 'card', wire: 'card', source: 'json', codec: strictCodec('dsh-cosplay#RoleCard') }], result: resultCodec('dsh-cosplay#CosplayState') },
+      { id: 'dsh-cosplay#cosplay/removeRole', service: 'cosplay', namespace: 'cosplay', method: 'removeRole', invocation: { kind: 'direct' }, parameters: [{ name: 'id', wire: 'id', source: 'json', codec: strictCodec('dsh-cosplay#RoleId') }], result: resultCodec('dsh-cosplay#CosplayState') },
+      { id: 'dsh-cosplay#cosplay/setActiveRole', service: 'cosplay', namespace: 'cosplay', method: 'setActiveRole', invocation: { kind: 'direct' }, parameters: [{ name: 'id', wire: 'id', source: 'json', codec: strictCodec('dsh-cosplay#RoleId') }], result: resultCodec('dsh-cosplay#CosplayState') },
+      { id: 'dsh-cosplay#cosplay/setEnabled', service: 'cosplay', namespace: 'cosplay', method: 'setEnabled', invocation: { kind: 'direct' }, parameters: [{ name: 'enabled', wire: 'enabled', source: 'json', codec: strictCodec('dsh-cosplay#Enabled') }], result: resultCodec('dsh-cosplay#CosplayState') },
+      { id: 'dsh-cosplay#cosplay/setThinkingStyle', service: 'cosplay', namespace: 'cosplay', method: 'setThinkingStyle', invocation: { kind: 'direct' }, parameters: [{ name: 'style', wire: 'style', source: 'json', codec: strictCodec('dsh-cosplay#ThinkingStyle') }], result: resultCodec('dsh-cosplay#CosplayState') },
     ]
     const COSPLAY_REMOTE = { package: 'dsh-cosplay', descriptors: COSPLAY_INVOCATIONS }
 
@@ -114,6 +122,10 @@ window.__ModuleLoader__.load({
           return () => listeners.delete(listener)
         },
         getSnapshot: () => snapshot,
+        /** 把挂载期的失败显式落到快照，界面据此显示原因而不是停在"加载中"。 */
+        fail(error) {
+          settle({ status: 'unavailable', value: undefined, error: String(error && error.message ? error.message : error) })
+        },
         async load() {
           const res = await call((r) => r.getState())
           if (res === undefined) return
@@ -136,26 +148,67 @@ window.__ModuleLoader__.load({
     return {
       name: 'cosplay-client',
       inject: ['remote', 'slots', 'connection'],
-      apply(ctx) {
+      /**
+       * 挂载本插件的 Remote 命名空间并注册设置页分区。
+       *
+       * 0.2.x 的三条硬约束（全部踩过坑，依据运行时实现）：
+       *   1. **不要**用 `ctx.effect(async () => { await ctx.remote.$mount(...) })` 包挂载。
+       *      cordis 的 effect 收尾是 `task?.catch(() => dispose()).catch(logger.error)`，
+       *      第一个 catch 会返回 undefined，于是 rejection 连 logger 都到不了——浏览器侧
+       *      只表现为设置页永远"加载中…"。改为让 apply 自身 async 并 return disposer，
+       *      失败会把 fiber 置为 FAILED 并出现在插件面板的失败清单里。
+       *   2. 读取 `ctx.remote.<ns>` 前**必须**用 `ctx.inject(['remote.<ns>'], cb)` 声明，
+       *      否则 Reflect 会抛 `cannot get property "remote.cosplay" without inject`。
+       *   3. 注入必须在 `$mount` **之后**发起：注入发生在 apply 体内，此时 fiber 已在
+       *      激活流程中，若在插件顶层 inject 自己的命名空间会自依赖死锁。挂载完成后
+       *      该服务已存在，`ctx.inject` 随即解析。
+       * @param ctx - 客户端插件上下文。
+       * @returns 卸载函数。
+       */
+      async apply(ctx) {
         let cosplayRemote = undefined
+        let unregister = undefined
         const store = createCosplayStore(() => cosplayRemote)
-        const slots = ctx.get('slots')
-        if (slots === undefined) return
-        ctx.effect(async () => {
-          const dispose = await ctx.remote.$mount(COSPLAY_REMOTE)
-          cosplayRemote = ctx.reflect.get('remote.cosplay')
-          if (cosplayRemote === undefined) {
-            throw new Error('dsh-cosplay: the cosplay Remote namespace did not mount')
+        const report = (error) => {
+          const message = String(error && error.message ? error.message : error)
+          store.fail(`Remote 挂载失败：${message}`)
+          console.error('[dsh-cosplay] Remote 挂载失败:', message, error)
+          return new Error(`COSPLAY_MOUNT_FAILED: ${message}`)
+        }
+        try {
+          const disposeRemote = await ctx.remote.$mount(COSPLAY_REMOTE)
+          // 挂载已就绪，现在声明依赖并消费命名空间（见上文第 2/3 条）
+          const ui = ctx.inject(['remote.cosplay', 'slots'], (child) => {
+            const remote = child.remote?.cosplay
+            if (remote === undefined) {
+              throw new Error('the cosplay Remote namespace did not resolve after mount')
+            }
+            cosplayRemote = remote
+            unregister = child.slots.inject('settings.section', () =>
+              child.slots.register(
+                // 0.2.x 的 slots.register 以 options.priority 为主排序键（值越小越先渲染），
+                // order 仍作为同优先级内的次级键。
+                { name: 'settings.section', id: 'cosplay', priority: 100, label: '角色扮演' },
+                () => React.createElement(CosplaySection, { store }),
+              ),
+            )
+            void store.load()
+          })
+          try {
+            await ui
+          } catch (error) {
+            await ui.dispose()
+            await disposeRemote()
+            throw error
           }
-          void store.load()
-          return dispose
-        }, 'dsh-cosplay: remote mount')
-        slots.inject('settings.section', () =>
-          slots.register(
-            { name: 'settings.section', id: 'cosplay', order: 100, label: '角色扮演' },
-            () => React.createElement(CosplaySection, { store }),
-          ),
-        )
+          return async () => {
+            if (typeof unregister === 'function') unregister()
+            await ui.dispose()
+            await disposeRemote()
+          }
+        } catch (error) {
+          throw report(error)
+        }
       },
     }
 
