@@ -1,6 +1,6 @@
 {
   "name": "dsh-cosplay",
-  "version": "0.5.0",
+  "version": "0.5.1",
   "description": "Cosplay mode for DeepSeek Harness: a global switch turns the agent into any character you define, with a settings UI for role configuration and management.",
   "repository": {
     "type": "git",
