@@ -1,6 +1,6 @@
 {
   "name": "dsh-cosplay",
-  "version": "0.6.0",
+  "version": "0.6.1",
   "description": "Cosplay mode for DeepSeek Harness: a global switch turns the agent into any character you define, with a settings UI for role configuration and management.",
   "type": "module",
   "main": "src/index.js",
@@ -36,9 +36,10 @@
       ]
     },
     "compatibility": {
-      "dsh": ">=0.1.7-alpha.2",
+      "dsh": ">=0.1.7-alpha.2 <0.3.0-0",
       "dshReleases": {
-        "0.1.7-alpha.2": "compatible"
+        "0.1.7-alpha.2": "compatible",
+        "0.2.0-rc.2": "compatible"
       }
     }
   },
@@ -47,9 +48,9 @@
   },
   "peerDependencies": {
     "@deepseek-ai/cordis": "^4.0.4",
-    "@deepseek-ai/dsh-settings": "^0.1.7-alpha.2",
-    "@deepseek-ai/dsh-system-prompt": "^0.1.7-alpha.2",
-    "@deepseek-ai/dsh-tools": "^0.1.7-alpha.2"
+    "@deepseek-ai/dsh-settings": ">=0.1.7-alpha.2 <0.3.0-0",
+    "@deepseek-ai/dsh-system-prompt": ">=0.1.7-alpha.2 <0.3.0-0",
+    "@deepseek-ai/dsh-tools": ">=0.1.7-alpha.2 <0.3.0-0"
   },
   "peerDependenciesMeta": {
     "@deepseek-ai/cordis": {

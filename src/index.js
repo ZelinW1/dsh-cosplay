@@ -23,8 +23,10 @@
  * 本行是纯主机平面：不依赖任何 preset。全局生效范围含所有会话与子代理
  * （Round 3 已与用户确认）。
  *
- * 兼容性：0.1.7-alpha.2 起。0.1.5 及更早版本的 `ctx.settings.register/get`
- * 命名空间 API 已被移除，本插件不再支持那些版本。
+ * 兼容性：0.1.7-alpha.2 起、0.3.0 之前（peer 范围 >=0.1.7-alpha.2 <0.3.0-0，
+ * 已在 0.1.7-alpha.2 / 0.1.7-rc.1 / 0.2.0-rc.2 上验证）。0.1.5 及更早版本的
+ * `ctx.settings.register/get` 命名空间 API 已被移除，本插件不再支持那些版本。
+ * 0.2.0 未改动本插件用到的接口，故仅放宽 peer 范围；0.3.0 仍拦住。
  */
 import z from '@deepseek-ai/schemastery'
 import { defineTool } from '@deepseek-ai/dsh-tools'

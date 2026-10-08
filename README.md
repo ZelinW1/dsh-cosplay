@@ -24,7 +24,11 @@ dsh plugin --profile web add dsh-cosplay
 
 > 依赖说明：运行时只需额外装一个 `@deepseek-ai/schemastery`；其余服务包（cordis、dsh-settings、dsh-tools、dsh-system-prompt）写在 `peerDependencies` 里即可 —— dsh 对 linked 插件有一套模块解析拦截，会把声明为 peer 的包路由到 **harness 自己的安装副本**，所以本地**不要**安装它们（每个都拖着 10+ 个 harness 包的 peer，装了会让 pnpm 解析爆炸、安装卡死）。仓库里的 `.npmrc` 已关掉 `auto-install-peers` 来保证这一点。
 >
-> 兼容性：需要 DeepSeek Harness **`0.1.7-alpha.2` 起**。0.1.7 把 `ctx.settings` 从「自定义命名空间注册表」（`register` / `get` / 按命名空间 `replace`）换成了 `SettingsForms`：设置表单改由**插件自己的 Config schema** 投影生成，可编辑字段标 `.volatile()`，表单以 profile 条目 id 为键。因此 0.1.5 及更早版本不再支持。persona 段位置仍按版本解析（`DEPLOYMENT_PERSONA_PREFIX` 优先，回退旧 `DEPLOYMENT_PERSONA`）。
+> 兼容性：需要 DeepSeek Harness **`0.1.7-alpha.2` 起、`0.3.0` 之前**（peer 范围 `>=0.1.7-alpha.2 <0.3.0-0`）。已在 `0.1.7-alpha.2` / `0.1.7-rc.1` / `0.2.0-rc.2` 上验证。
+>
+> 0.1.7 把 `ctx.settings` 从「自定义命名空间注册表」（`register` / `get` / 按命名空间 `replace`）换成了 `SettingsForms`：设置表单改由**插件自己的 Config schema** 投影生成，可编辑字段标 `.volatile()`，表单以 profile 条目 id 为键。因此 0.1.5 及更早版本不再支持。persona 段位置仍按版本解析（`DEPLOYMENT_PERSONA_PREFIX` 优先，回退旧 `DEPLOYMENT_PERSONA`）。
+>
+> 0.2.0 未改动本插件用到的任何接口（`SettingsForms` / `systemPrompt.section|variable|getSectionOrder` / `tools.register`+`defineTool` / `skills.register` / `configEditor.edit` / `settings.section` 插槽 / `remote.settings` 远程通道在两版之间逐字节一致），所以只是把 peer 范围放宽到覆盖 0.2.x；`0.3.0` 仍被拦住，避免未知的破坏性改动静默生效。
 
 ## 使用
 
